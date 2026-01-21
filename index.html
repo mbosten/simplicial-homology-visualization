@@ -1,0 +1,1035 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>3D Filtrations (Vietoris–Rips / Čech)</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        }
+
+        #ui {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            z-index: 10;
+            background: rgba(255, 255, 255, 0.92);
+            backdrop-filter: blur(6px);
+            border-radius: 12px;
+            padding: 12px 12px 10px 12px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+            width: 320px;
+        }
+
+        #ui label {
+            display: block;
+            margin: 8px 0 4px;
+            font-size: 13px;
+        }
+
+        #ui .row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        #ui select,
+        #ui input[type="range"],
+        #ui button {
+            width: 100%;
+        }
+
+        #ui small {
+            color: #444;
+            display: block;
+            margin-top: 6px;
+            line-height: 1.25;
+        }
+
+        #hud {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 8px;
+        }
+
+        #hud code {
+            background: rgba(0, 0, 0, 0.06);
+            padding: 2px 6px;
+            border-radius: 6px;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        .tabActive {
+            outline: 2px solid rgba(0, 0, 0, 0.25);
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div class="row">
+            <button id="regen">Regenerate points</button>
+        </div>
+
+        <label for="filtration">Filtration</label>
+        <select id="filtration">
+            <option value="vr">Vietoris–Rips</option>
+            <option value="cech">Čech</option>
+        </select>
+
+        <label for="r">Scale parameter (ball radius r): <span id="rLabel"></span></label>
+        <input id="r" type="range" min="0.02" max="0.75" step="0.01" value="0.15" />
+
+        <div class="row" style="margin-top:10px;">
+            <input id="showBalls" type="checkbox" checked />
+            <label for="showBalls" style="margin:0; flex:1;">Show balls (transparent)</label>
+        </div>
+
+        <div id="hud">
+            <div><small>Points: <code id="nPts"></code></small></div>
+            <div><small>Edges: <code id="nEdges"></code></small></div>
+            <div><small>Triangles: <code id="nTris"></code></small></div>
+
+            <div><small>β₀: <code id="b0"></code></small></div>
+            <div><small>β₁: <code id="b1"></code></small></div>
+            <div id="b2Row"><small>β₂: <code id="b2"></code></small></div>
+        </div>
+
+        <small>
+            VR: edges if dist ≤ 2r; triangles if all 3 edges present.<br />
+            Čech: triangle if smallest enclosing circle radius ≤ r (equal radii).
+        </small>
+        <label style="margin-top:10px;">Persistence landscape (VR)</label>
+
+        <div class="row" style="gap:6px; margin-top:6px;">
+            <button id="tabH0" type="button">H0</button>
+            <button id="tabH1" type="button">H1</button>
+            <button id="tabH2" type="button">H2</button>
+        </div>
+        <label for="kLandscape" style="margin-top:8px;">Landscape layers (Top-K)</label>
+        <select id="kLandscape">
+            <option value="1">1</option>
+            <option value="3" selected>3</option>
+            <option value="5">5</option>
+            <option value="10">10</option>
+        </select>
+        <canvas id="landscape" width="296" height="140"
+            style="width:100%; height:140px; border-radius:10px; background:rgba(0,0,0,0.04); margin-top:6px;"></canvas>
+        <small id="landscapeNote"></small>
+        <div style="margin-top:6px;">
+            <small>‖λ‖₂ (top-K): <code id="L2"></code></small>
+        </div>
+        <label for="coords">Point coordinates (JSON array of [x,y,z])</label>
+        <textarea id="coords" rows="6"
+            style="width:100%; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;"></textarea>
+        <div class="row" style="margin-top:8px;">
+            <button id="btnExport">Export → textarea</button>
+            <button id="btnImport">Import ← textarea</button>
+        </div>
+    </div>
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+        "three/examples/jsm/controls/OrbitControls.js":
+          "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/controls/OrbitControls.js"
+      }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from "three";
+        import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+
+        // --------------------------
+        // Config
+        // --------------------------
+        const NUM_POINTS = 35;
+        const BOX = 2.0;           // point cloud spread
+        const POINT_RADIUS = 0.03; // visual point sphere radius (not filtration r)
+
+        // --------------------------
+        // Scene setup
+        // --------------------------
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(devicePixelRatio);
+        renderer.setSize(innerWidth, innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf7f7fb);
+
+        const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 200);
+        camera.position.set(3.2, 2.2, 3.2);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        // Lights
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+        dir.position.set(4, 6, 3);
+        scene.add(dir);
+
+        // Reference axes + box
+        const axes = new THREE.AxesHelper(1.5);
+        axes.material.transparent = true;
+        axes.material.opacity = 0.35;
+        scene.add(axes);
+
+        const box = new THREE.Box3(
+            new THREE.Vector3(-BOX / 2, -BOX / 2, -BOX / 2),
+            new THREE.Vector3(BOX / 2, BOX / 2, BOX / 2)
+        );
+        const boxHelper = new THREE.Box3Helper(box, 0xcccccc);
+        boxHelper.material.transparent = true;
+        boxHelper.material.opacity = 0.35;
+        scene.add(boxHelper);
+
+        // --------------------------
+        // Data + objects
+        // --------------------------
+        let points = []; // { id, p: THREE.Vector3 }
+        let pointMeshes = [];
+        let ballMeshes = [];
+
+        let edgesLines = null;
+        let triMesh = null;
+
+        // Materials
+        const pointMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.35, metalness: 0.0 });
+        const ballMat = new THREE.MeshStandardMaterial({
+            color: 0x3b82f6,
+            transparent: true,
+            opacity: 0.15,
+            roughness: 0.15,
+            metalness: 0.0,
+            depthWrite: false
+        });
+
+        // --------------------------
+        // UI
+        // --------------------------
+        const $ = (id) => document.getElementById(id);
+        const filtrationSel = $("filtration");
+        const rSlider = $("r");
+        const rLabel = $("rLabel");
+        const showBallsChk = $("showBalls");
+        const regenBtn = $("regen");
+        const nPtsEl = $("nPts");
+        const nEdgesEl = $("nEdges");
+        const nTrisEl = $("nTris");
+        const b0El = $("b0");
+        const b1El = $("b1");
+        const b2El = $("b2");
+        const b2Row = $("b2Row");
+
+        // Used for import/export of point coordinates
+        const coordsTA = $("coords");
+        const btnExport = $("btnExport");
+        const btnImport = $("btnImport");
+
+        // vars for landscape visualization
+        const landscapeCanvas = $("landscape");
+        const lctx = landscapeCanvas.getContext("2d");
+        const landscapeNote = $("landscapeNote");
+
+        // vars for tab-style landscape UI
+        const tabH0 = $("tabH0");
+        const tabH1 = $("tabH1");
+        const tabH2 = $("tabH2");
+
+        // vars for landscape norms
+        const L2El = $("L2");
+        const kLandscapeSel = $("kLandscape");
+
+        let landscapeDim = 1; // default H1
+        let ripserWorker = null;
+        let ripserReady = false;
+        let ripserRunningSince = undefined;
+        let ripserHasResult = false;
+
+        // storage for landscape
+        let vrIntervals = { 0: [], 1: [], 2: [] };
+        let currentRipserRangeMax = 1.0; // used for landscape x-axis scaling
+
+        btnExport.addEventListener("click", () => {
+            coordsTA.value = exportPointsJSON();
+        });
+
+        btnImport.addEventListener("click", () => {
+            const coords = JSON.parse(coordsTA.value);
+            setPointsFromCoords(coords);
+        });
+
+        kLandscapeSel.addEventListener("change", () => {
+            // redraw if we have results
+            if (filtrationSel.value === "vr" && ripserHasResult) {
+                drawLandscape({ dim: landscapeDim, K: getK(), tMax: getTMax(), tNow: getTNow() });
+                updateLandscapeL2UI({ dim: landscapeDim, K: getK(), tMax: getTMax() });
+            }
+        });
+
+        function getR() { return parseFloat(rSlider.value); }
+
+        function getK() {
+            return parseInt(kLandscapeSel.value, 10) || 3;
+        }
+
+        function updateUILabels({ edges = 0, tris = 0, betti = [0, 0, null], showB2 = true } = {}) {
+            rLabel.textContent = getR().toFixed(2);
+            nPtsEl.textContent = String(points.length);
+            nEdgesEl.textContent = String(edges);
+            nTrisEl.textContent = String(tris);
+
+            b0El.textContent = String(betti[0]);
+            b1El.textContent = String(betti[1]);
+
+            // Show/hide β2 row
+            b2Row.style.display = showB2 ? "" : "none";
+            if (showB2 && betti[2] !== null && betti[2] !== undefined) {
+                b2El.textContent = String(betti[2]);
+            } else {
+                b2El.textContent = "";
+            }
+        }
+
+        function updateLandscapeL2UI({ dim, K, tMax }) {
+            const L2 = computeLandscapeL2({ dim, K, tMax, N: 400 });
+            L2El.textContent = (Math.round(L2 * 1e6) / 1e6).toString();
+        }
+
+
+        function computeLandscapeL2({ dim = 1, K = 3, tMax = 1.0, N = 400 } = {}) {
+            const intervals = vrIntervals[dim] || [];
+            if (!intervals.length) return 0;
+
+            const dt = tMax / (N - 1);
+            let sumSq = 0;
+
+            for (let i = 0; i < N; i++) {
+                const t = i * dt;
+                const top = landscapeAt(intervals, t, K); // returns [λ1(t), ..., λK(t)]
+
+                // Combine layers as ℓ2 across k: v^2 = Σ_k λ_k(t)^2
+                let v2 = 0;
+                for (let k = 0; k < K; k++) v2 += top[k] * top[k];
+
+                // Integral of v^2 dt
+                sumSq += v2;
+            }
+
+            return Math.sqrt(sumSq * dt);
+        }
+
+        function setLandscapeDim(d) {
+            landscapeDim = d;
+
+            tabH0.classList.toggle("tabActive", d === 0);
+            tabH1.classList.toggle("tabActive", d === 1);
+            tabH2.classList.toggle("tabActive", d === 2);
+
+            // redraw immediately
+            if (filtrationSel.value === "vr") {
+                drawLandscape({ dim: landscapeDim, K: getK(), tMax: getTMax(), tNow: getTNow() });
+                updateLandscapeL2UI({ dim: landscapeDim, K: getK(), tMax: getTMax() });
+                landscapeNote.textContent = "";
+            } else {
+                lctx.clearRect(0, 0, landscapeCanvas.width, landscapeCanvas.height);
+                landscapeNote.textContent = "Landscape shown for VR only.";
+                L2El.textContent = "";
+            }
+        }
+
+        tabH0.addEventListener("click", () => setLandscapeDim(0));
+        tabH1.addEventListener("click", () => setLandscapeDim(1));
+        tabH2.addEventListener("click", () => setLandscapeDim(2));
+
+        // set initial active tab
+        setLandscapeDim(1);
+
+        function setPointsFromCoords(coords) {
+            // coords: array of [x,y,z] with length NUM_POINTS
+            if (!Array.isArray(coords) || coords.length !== NUM_POINTS) {
+                throw new Error(`Expected coords to be an array of length ${NUM_POINTS}.`);
+            }
+
+            // Clear current points/meshes and rebuild from coords
+            clearPoints();
+
+            const pointGeom = new THREE.SphereGeometry(POINT_RADIUS, 16, 12);
+            const unitSphereGeom = new THREE.SphereGeometry(1, 18, 14);
+
+            for (let i = 0; i < coords.length; i++) {
+                const [x, y, z] = coords[i];
+                const p = new THREE.Vector3(x, y, z);
+                points.push({ id: i, p });
+
+                const pm = new THREE.Mesh(pointGeom, pointMat.clone());
+                pm.position.copy(p);
+                scene.add(pm);
+                pointMeshes.push(pm);
+
+                const bm = new THREE.Mesh(unitSphereGeom, ballMat.clone());
+                bm.position.copy(p);
+                scene.add(bm);
+                ballMeshes.push(bm);
+            }
+
+            recomputeVRPersistence();
+            // Recompute complex for current filtration + r
+            scheduleRebuildComplex();
+        }
+
+        function exportPointsJSON() {
+            const coords = points.map(o => [o.p.x, o.p.y, o.p.z]);
+            const json = JSON.stringify(coords);
+            console.log(json);
+            return json;
+        }
+
+        // --------------------------
+        // Landscape drawing
+        // --------------------------
+        function tent(b, d, t) {
+            const v = Math.min(t - b, d - t);
+            return Math.max(0, v);
+        }
+
+        // Evaluate top K landscape functions at t
+        function landscapeAt(intervals, t, K = 3) {
+            const vals = [];
+            for (const [b, d] of intervals) {
+                if (!Number.isFinite(d)) continue;     // ignore infinite bars in landscape
+                if (t < b || t > d) continue;
+                vals.push(tent(b, d, t));
+            }
+            vals.sort((a, b) => b - a);
+            while (vals.length < K) vals.push(0);
+            return vals.slice(0, K);
+        }
+
+        function drawLandscape({ dim = 1, K = 3, tMax = 1.0, tNow = 0.3 } = {}) {
+            const intervals = vrIntervals[dim] || [];
+            const W = landscapeCanvas.width;
+            const H = landscapeCanvas.height;
+
+            // clear
+            lctx.clearRect(0, 0, W, H);
+
+            // background axes
+            lctx.globalAlpha = 1;
+            lctx.lineWidth = 1;
+            lctx.beginPath();
+            lctx.moveTo(30, 10);
+            lctx.lineTo(30, H - 20);
+            lctx.lineTo(W - 10, H - 20);
+            lctx.stroke();
+
+            // if no data
+            if (!intervals.length) {
+                lctx.fillText("No VR landscape (compute on points)", 40, 30);
+                return;
+            }
+
+            // sample points along x
+            const N = 200;
+            const ts = [];
+            for (let i = 0; i < N; i++) ts.push((i / (N - 1)) * tMax);
+
+            // compute values and max for scaling
+            const ys = Array.from({ length: K }, () => new Array(N).fill(0));
+            let yMax = 1e-9;
+
+            for (let i = 0; i < N; i++) {
+                const t = ts[i];
+                const top = landscapeAt(intervals, t, K);
+                for (let k = 0; k < K; k++) {
+                    ys[k][i] = top[k];
+                    yMax = Math.max(yMax, top[k]);
+                }
+            }
+
+            // plot each k as a polyline
+            lctx.lineWidth = 2;
+            for (let k = 0; k < K; k++) {
+                lctx.beginPath();
+                for (let i = 0; i < N; i++) {
+                    const t = ts[i];
+                    const x = 30 + (t / tMax) * (W - 40);
+                    const y = (H - 20) - (ys[k][i] / yMax) * (H - 35);
+                    if (i === 0) lctx.moveTo(x, y);
+                    else lctx.lineTo(x, y);
+                }
+                lctx.stroke();
+            }
+
+            // draw a vertical marker for current tNow
+            const xNow = 30 + (Math.min(tNow, tMax) / tMax) * (W - 40);
+            lctx.globalAlpha = 0.7;
+            lctx.beginPath();
+            lctx.moveTo(xNow, 10);
+            lctx.lineTo(xNow, H - 20);
+            lctx.stroke();
+            lctx.globalAlpha = 1;
+
+            // labels
+            lctx.fillText(`H${dim} landscape (top ${K})`, 40, 18);
+            lctx.fillText(`t = ${tNow.toFixed(2)} / ${tMax.toFixed(2)}`, 40, H - 6);
+        }
+
+        // set scale parameter range
+        function getTMax() {
+            return 2 * parseFloat(rSlider.max);
+        }
+        function getTNow() {
+            return 2 * getR();
+        }
+
+        // --------------------------
+        // Ripser implementation
+        // --------------------------
+
+        function distanceMatrixTextFromPoints() {
+            const n = points.length;
+            const rows = [];
+            for (let i = 0; i < n; i++) {
+                const a = points[i].p;
+                const row = [];
+                for (let j = 0; j < n; j++) {
+                    const b = points[j].p;
+                    row.push(a.distanceTo(b).toString());
+                }
+                rows.push(row.join(" "));
+            }
+            return rows.join("\n");
+        }
+
+
+        function initRipserWorker() {
+            if (ripserWorker) return;
+
+            ripserWorker = new Worker("./js/ripser-worker.js");
+            ripserWorker.addEventListener("message", handleRipserMessage, false);
+
+            ripserWorker.addEventListener("error", (e) => {
+                console.error("Ripser worker error:", e);
+                ripserReady = false;
+            }, false);
+        }
+
+        function restartRipserWorker() {
+            if (ripserWorker) ripserWorker.terminate();
+            ripserWorker = null;
+            ripserReady = false;
+            initRipserWorker();
+        }
+
+        function recomputeVRPersistence() {
+            // Only do landscapes for VR
+            if (filtrationSel.value !== "vr") return;
+
+            initRipserWorker();
+            if (!ripserReady) return; // will auto-run when ready arrives
+
+            // If a run is in progress, restart like the demo does
+            if (ripserRunningSince !== undefined) {
+                restartRipserWorker();
+                return; // the new worker will send "ready" and we’ll call again
+            }
+
+            // reset intervals
+            vrIntervals = { 0: [], 1: [], 2: [] };
+            ripserHasResult = false;
+
+            const fileText = distanceMatrixTextFromPoints();
+            const dim = 2;
+            const thresholdVal = getTMax(); // max distance
+            const format = 2; // "distance"
+
+            ripserRunningSince = Date.now();
+
+            ripserWorker.postMessage({
+                file: fileText,
+                dim,
+                threshold: thresholdVal,
+                format
+            });
+        }
+
+        function handleRipserMessage(message) {
+            const m = message.data;
+
+            if (m.type === "ready") {
+                ripserReady = true;
+                // If we're in VR mode, compute immediately
+                if (filtrationSel.value === "vr") recomputeVRPersistence();
+                return;
+            }
+
+            if (m.type === "abort") {
+                console.warn("Ripser aborted");
+                ripserRunningSince = undefined;
+                ripserReady = false;
+                return;
+            }
+
+            if (m.type === "distance-matrix") {
+                // Use this for scaling x-axis if threshold not set
+                currentRipserRangeMax = Math.min(getTMax(), m.max ?? currentRipserRangeMax);
+                return;
+            }
+
+            if (m.type === "dim") {
+                // nothing required; intervals follow
+                return;
+            }
+
+            if (m.type === "interval") {
+                const d = m.dim;
+                if (d === 0 || d === 1 || d === 2) {
+                    const birth = m.birth;
+                    const death = (m.death === 0 || m.death === null || m.death === undefined) ? Infinity : m.death;
+                    vrIntervals[d].push([birth, death]);
+                }
+                return;
+            }
+
+            if (m.type === "finished") {
+                ripserRunningSince = undefined;
+                ripserHasResult = true;
+
+                // Draw landscape now that intervals exist
+                drawLandscape({
+                    dim: landscapeDim,
+                    K: getK(),
+                    tMax: getTMax(),
+                    tNow: getTNow()
+                });
+                updateLandscapeL2UI({ dim: landscapeDim, K: getK(), tMax: getTMax() });
+
+                return;
+            }
+        }
+        // --------------------------
+        // Helpers: geometry + math
+        // --------------------------
+        function randPointInBox() {
+            const h = BOX / 2;
+            return new THREE.Vector3(
+                (Math.random() * 2 - 1) * h,
+                (Math.random() * 2 - 1) * h,
+                (Math.random() * 2 - 1) * h
+            );
+        }
+
+        function dist(a, b) { return a.distanceTo(b); }
+
+        // Smallest enclosing circle radius for 3 points in 3D (they lie in a plane).
+        // If triangle obtuse/right -> half max side; else circumradius.
+        function smallestEnclosingRadius3(a, b, c) {
+            const ab = dist(a, b), bc = dist(b, c), ca = dist(c, a);
+            const sides = [ab, bc, ca].sort((x, y) => x - y); // s0<=s1<=s2
+            const s0 = sides[0], s1 = sides[1], s2 = sides[2];
+
+            const s0_2 = s0 * s0, s1_2 = s1 * s1, s2_2 = s2 * s2;
+            if (s2_2 >= s0_2 + s1_2) return 0.5 * s2; // obtuse/right
+
+            // Acute: circumradius R = abc / (4A), A from Heron
+            const p = 0.5 * (ab + bc + ca);
+            const area2 = Math.max(p * (p - ab) * (p - bc) * (p - ca), 0);
+            const area = Math.sqrt(area2);
+            if (area < 1e-10) return Infinity; // nearly collinear
+            return (ab * bc * ca) / (4 * area);
+        }
+
+        // Build edges + triangles for chosen filtration at radius r
+        function computeComplex(pts, filtration, r) {
+            const n = pts.length;
+            const edges = []; // [i,j]
+            const edgeSet = new Set(); // "i,j" with i<j
+            const thr = 2 * r;
+
+            // Edges
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    const dij = dist(pts[i].p, pts[j].p);
+                    if (dij <= thr) {
+                        edges.push([i, j]);
+                        edgeSet.add(i + "," + j);
+                    }
+                }
+            }
+
+            // Triangles (2-simplices)
+            const tris = []; // [i,j,k]
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    if (!edgeSet.has(i + "," + j)) continue;
+                    for (let k = j + 1; k < n; k++) {
+                        const ik = i + "," + k;
+                        const jk = j + "," + k;
+                        if (!edgeSet.has(ik) || !edgeSet.has(jk)) continue;
+
+                        if (filtration === "vr") {
+                            tris.push([i, j, k]);
+                        } else { // Čech
+                            const req = smallestEnclosingRadius3(pts[i].p, pts[j].p, pts[k].p);
+                            if (req <= r + 1e-12) tris.push([i, j, k]);
+                        }
+                    }
+                }
+            }
+
+            // tetrahedra (3-simplices)
+            let tets = []; // [i,j,k,l]
+            if (filtration === "vr") {
+                // VR: clique complex -> 4-simplex present iff all 6 edges present
+                for (let i = 0; i < n; i++) {
+                    for (let j = i + 1; j < n; j++) {
+                        if (!edgeSet.has(i + "," + j)) continue;
+                        for (let k = j + 1; k < n; k++) {
+                            if (!edgeSet.has(i + "," + k) || !edgeSet.has(j + "," + k)) continue;
+                            for (let l = k + 1; l < n; l++) {
+                                if (
+                                    edgeSet.has(i + "," + l) &&
+                                    edgeSet.has(j + "," + l) &&
+                                    edgeSet.has(k + "," + l)
+                                ) {
+                                    tets.push([i, j, k, l]);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Čech: we deliberately drop 3-simplices here to avoid heavy 4-point
+                // minimal enclosing ball computations and to keep homology on 2-skeleton.
+                tets = [];
+            }
+            return { edges, tris, tets };
+        }
+        // --------------------------
+        // Homology (Betti numbers) over GF(2)
+        // --------------------------
+
+        // Return index of most significant set bit in BigInt (or -1 if x=0)
+        function msbIndex(x) {
+            if (x === 0n) return -1;
+            // Convert to binary string (fine for our small sizes)
+            return x.toString(2).length - 1;
+        }
+
+        // Compute rank of a binary matrix given as array of row-bitsets (BigInt),
+        // where bits index columns 0..nCols-1.
+        function rankGF2(rowBits) {
+            const basis = new Map(); // pivotCol -> row
+            let rank = 0;
+
+            for (let r of rowBits) {
+                while (r !== 0n) {
+                    const p = msbIndex(r);
+                    const pivotRow = basis.get(p);
+                    if (!pivotRow) {
+                        basis.set(p, r);
+                        rank++;
+                        break;
+                    }
+                    r = r ^ pivotRow; // eliminate pivot
+                }
+            }
+            return rank;
+        }
+
+        function computeRanks12(V, edges, tris) {
+            const E = edges.length;
+            const F = tris.length;
+
+            // ∂1: rows (vertices) x cols (edges)
+            const d1Rows = Array.from({ length: V }, () => 0n);
+            for (let e = 0; e < E; e++) {
+                const [i, j] = edges[e];
+                d1Rows[i] |= (1n << BigInt(e));
+                d1Rows[j] |= (1n << BigInt(e));
+            }
+            const rank1 = rankGF2(d1Rows);
+
+            // edge -> index map
+            const edgeIndex = new Map();
+            for (let e = 0; e < E; e++) {
+                const [a, b] = edges[e];
+                edgeIndex.set(a + "," + b, e);
+            }
+
+            // ∂2: rows (edges) x cols (triangles)
+            const d2Rows = Array.from({ length: E }, () => 0n);
+            for (let t = 0; t < F; t++) {
+                const [i, j, k] = tris[t];
+
+                const e1 = edgeIndex.get(i + "," + j);
+                const e2 = edgeIndex.get(i + "," + k);
+                const e3 = edgeIndex.get(j + "," + k);
+
+                if (e1 !== undefined) d2Rows[e1] |= (1n << BigInt(t));
+                if (e2 !== undefined) d2Rows[e2] |= (1n << BigInt(t));
+                if (e3 !== undefined) d2Rows[e3] |= (1n << BigInt(t));
+            }
+            const rank2 = (F === 0) ? 0 : rankGF2(d2Rows);
+
+            return { rank1, rank2 };
+        }
+
+        function computeRank3(tris, tets) {
+            const F = tris.length;
+            const T = tets.length;
+            if (F === 0 || T === 0) return 0;
+
+            // triangle -> index map
+            const triIndex = new Map();
+            for (let t = 0; t < F; t++) {
+                const [i, j, k] = tris[t];
+                triIndex.set(i + "," + j + "," + k, t);
+            }
+
+            // ∂3: rows (triangles) x cols (tetrahedra)
+            const d3Rows = Array.from({ length: F }, () => 0n);
+
+            for (let s = 0; s < T; s++) {
+                const [i, j, k, l] = tets[s];
+                const faces = [
+                    [i, j, k],
+                    [i, j, l],
+                    [i, k, l],
+                    [j, k, l]
+                ];
+                for (const f of faces) {
+                    const key = f[0] + "," + f[1] + "," + f[2];
+                    const ti = triIndex.get(key);
+                    if (ti !== undefined) d3Rows[ti] |= (1n << BigInt(s));
+                }
+            }
+
+            return rankGF2(d3Rows);
+        }
+
+        // --------------------------
+        // Rendering the complex
+        // --------------------------
+        function clearComplexObjects() {
+            if (edgesLines) {
+                scene.remove(edgesLines);
+                edgesLines.geometry.dispose();
+                edgesLines.material.dispose();
+                edgesLines = null;
+            }
+            if (triMesh) {
+                scene.remove(triMesh);
+                triMesh.geometry.dispose();
+                triMesh.material.dispose();
+                triMesh = null;
+            }
+        }
+
+        function rebuildBalls(r, show) {
+            for (const m of ballMeshes) {
+                m.visible = show;
+                m.scale.setScalar(r); // geometry is unit sphere
+            }
+        }
+
+        // --------------------------
+        // UI throttling for rebuildComplex
+        // --------------------------
+        let rebuildScheduled = false;
+
+        function scheduleRebuildComplex() {
+            if (rebuildScheduled) return;
+            rebuildScheduled = true;
+
+            requestAnimationFrame(() => {
+                rebuildScheduled = false;
+                rebuildComplex();
+            });
+        }
+
+        function rebuildComplex() {
+            clearComplexObjects();
+
+            const r = getR();
+            const filtration = filtrationSel.value;
+
+            // balls
+            rebuildBalls(r, showBallsChk.checked);
+
+            // compute complex
+            const { edges, tris, tets } = computeComplex(points, filtration, r);
+
+            // edges: LineSegments
+            if (edges.length) {
+                const pos = new Float32Array(edges.length * 2 * 3);
+                let idx = 0;
+                for (const [i, j] of edges) {
+                    const a = points[i].p, b = points[j].p;
+                    pos[idx++] = a.x; pos[idx++] = a.y; pos[idx++] = a.z;
+                    pos[idx++] = b.x; pos[idx++] = b.y; pos[idx++] = b.z;
+                }
+                const geom = new THREE.BufferGeometry();
+                geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+                const mat = new THREE.LineBasicMaterial({ color: 0x111827, transparent: true, opacity: 0.75 });
+                edgesLines = new THREE.LineSegments(geom, mat);
+                scene.add(edgesLines);
+            }
+
+            // triangles: semi-transparent faces
+            if (tris.length) {
+                const pos = new Float32Array(tris.length * 3 * 3);
+                let idx = 0;
+                for (const [i, j, k] of tris) {
+                    const a = points[i].p, b = points[j].p, c = points[k].p;
+                    pos[idx++] = a.x; pos[idx++] = a.y; pos[idx++] = a.z;
+                    pos[idx++] = b.x; pos[idx++] = b.y; pos[idx++] = b.z;
+                    pos[idx++] = c.x; pos[idx++] = c.y; pos[idx++] = c.z;
+                }
+                const geom = new THREE.BufferGeometry();
+                geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+                geom.computeVertexNormals();
+
+                const mat = new THREE.MeshStandardMaterial({
+                    color: 0x22c55e,
+                    transparent: true,
+                    opacity: 0.22,
+                    side: THREE.DoubleSide,
+                    depthWrite: false
+                });
+                triMesh = new THREE.Mesh(geom, mat);
+                scene.add(triMesh);
+            }
+
+            const V = points.length;
+            const E = edges.length;
+            const F = tris.length;
+
+            const { rank1, rank2 } = computeRanks12(V, edges, tris);
+
+            const beta0 = V - rank1;
+            const beta1 = E - rank1 - rank2;
+
+            if (filtration === "vr") {
+                const rank3 = computeRank3(tris, tets);
+                const beta2 = F - rank2 - rank3;
+                updateUILabels({ edges: E, tris: F, betti: [beta0, beta1, beta2], showB2: true });
+            } else {
+                // Čech: do not show β2 at all
+                updateUILabels({ edges: E, tris: F, betti: [beta0, beta1, null], showB2: false });
+            }
+
+            const tNow = getTNow();
+            const tMax = getTMax();
+
+            if (filtrationSel.value === "vr") {
+                if (ripserHasResult) {
+                    drawLandscape({
+                        dim: landscapeDim,
+                        K: getK(),
+                        tMax: getTMax(),
+                        tNow: getTNow()
+                    });
+                    updateLandscapeL2UI({ dim: landscapeDim, K: getK(), tMax: getTMax() });
+                    landscapeNote.textContent = "";
+                } else {
+                    lctx.clearRect(0, 0, landscapeCanvas.width, landscapeCanvas.height);
+                    lctx.fillText("Computing VR persistence…", 40, 30);
+                    landscapeNote.textContent = "";
+                    L2El.textContent = "";
+                }
+            } else {
+                // Optional: clear or keep last VR plot
+                lctx.clearRect(0, 0, landscapeCanvas.width, landscapeCanvas.height);
+                landscapeNote.textContent = "Landscape shown for VR only.";
+                L2El.textContent = "";
+            }
+        }
+
+        // --------------------------
+        // Build points
+        // --------------------------
+        function clearPoints() {
+            for (const m of [...pointMeshes, ...ballMeshes]) {
+                scene.remove(m);
+                m.geometry.dispose();
+                m.material.dispose();
+            }
+            pointMeshes = [];
+            ballMeshes = [];
+            points = [];
+        }
+
+        function createPoints(n = NUM_POINTS) {
+            clearPoints();
+
+            const pointGeom = new THREE.SphereGeometry(POINT_RADIUS, 16, 12);
+            const unitSphereGeom = new THREE.SphereGeometry(1, 18, 14);
+
+            for (let i = 0; i < n; i++) {
+                const p = randPointInBox();
+                points.push({ id: i, p });
+
+                const pm = new THREE.Mesh(pointGeom, pointMat.clone());
+                pm.position.copy(p);
+                scene.add(pm);
+                pointMeshes.push(pm);
+
+                const bm = new THREE.Mesh(unitSphereGeom, ballMat.clone());
+                bm.position.copy(p);
+                scene.add(bm);
+                ballMeshes.push(bm);
+            }
+
+            updateUILabels({ betti: [0, 0, 0] });
+            rebuildBalls(getR(), showBallsChk.checked);
+            scheduleRebuildComplex();
+            recomputeVRPersistence();
+        }
+
+        // --------------------------
+        // Events
+        // --------------------------
+        filtrationSel.addEventListener("change", () => {
+            scheduleRebuildComplex();
+            if (filtrationSel.value === "vr") recomputeVRPersistence();
+        });
+        rSlider.addEventListener("input", scheduleRebuildComplex);
+        showBallsChk.addEventListener("change", scheduleRebuildComplex);
+        regenBtn.addEventListener("click", () => createPoints(NUM_POINTS));
+
+        addEventListener("resize", () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // --------------------------
+        // Animate
+        // --------------------------
+        function tick() {
+            controls.update();
+            renderer.render(scene, camera);
+            requestAnimationFrame(tick);
+        }
+
+        // Start
+        createPoints(NUM_POINTS);
+        tick();
+    </script>
+</body>
+
+</html>
