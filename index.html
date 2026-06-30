@@ -228,6 +228,11 @@
             VR: edges if dist ≤ 2r; triangles if all 3 edges present.<br />
             Čech: triangle if smallest enclosing circle radius ≤ r (equal radii).
         </small>
+
+        <div style="margin-top:8px;">
+            <small>Σ pers(H₀) ≈ MST length: <code id="mstSummary"></code></small>
+        </div>
+
         <label style="margin-top:10px;">Persistence landscape (VR)</label>
 
         <div class="row" style="gap:6px; margin-top:6px;">
@@ -396,6 +401,9 @@
         const b1El = $("b1");
         const b2El = $("b2");
         const b2Row = $("b2Row");
+        const mstLengthEl = $("mstLength");
+        const mstSummaryEl = $("mstSummary");
+
 
         // Used for import/export of point coordinates
         const coordsTA = $("coords");
@@ -425,6 +433,8 @@
         // storage for landscape
         let vrIntervals = { 0: [], 1: [], 2: [] };
         let currentRipserRangeMax = 1.0; // used for landscape x-axis scaling
+
+        let currentMSTLength = 0;
 
         btnExport.addEventListener("click", () => {
             coordsTA.value = exportPointsJSON();
@@ -513,6 +523,22 @@
                 landscapeNote.textContent = "Landscape shown for VR only.";
                 L2El.textContent = "";
             }
+        }
+
+        function computeTotalH0Persistence() {
+            const intervals = vrIntervals[0] || [];
+            let total = 0;
+
+            for (const [birth, death] of intervals) {
+                if (!Number.isFinite(death)) continue;
+                total += death - birth;
+            }
+        
+            return total;
+        }
+
+        function formatScalar(value) {
+            return (Math.round(value * 1e6) / 1e6).toString();
         }
 
         tabH0.addEventListener("click", () => setLandscapeDim(0));
@@ -782,6 +808,19 @@
                 });
                 updateLandscapeL2UI({ dim: landscapeDim, K: getK(), tMax: getTMax() });
 
+                const h0 = computeTotalH0Persistence();
+
+                const tol = 1e-6 * Math.max(1, currentMSTLength);
+
+                if (Math.abs(h0 - currentMSTLength) < tol) {
+                    mstSummaryEl.textContent = formatScalar(currentMSTLength);
+                } else {
+                    console.warn(
+                        `ΣH0 (${h0}) does not equal MST length (${currentMSTLength}).`
+                    );
+                    mstSummaryEl.textContent = "";
+                }
+
                 return;
             }
         }
@@ -819,47 +858,97 @@
 
         // Build the Euclidean minimum spanning tree (MST) on the point cloud.
         // This is independent of the filtration radius and is only used for visualization.
-        function computeMSTEdges(pts) {
+        // function computeMSTEdges(pts) {
+        //     const n = pts.length;
+        //     if (n <= 1) return [];
+
+        //     const candidates = [];
+        //     for (let i = 0; i < n; i++) {
+        //         for (let j = i + 1; j < n; j++) {
+        //             candidates.push([dist(pts[i].p, pts[j].p), i, j]);
+        //         }
+        //     }
+        //     candidates.sort((a, b) => a[0] - b[0]);
+
+        //     const parent = Array.from({ length: n }, (_, i) => i);
+        //     const rank = Array.from({ length: n }, () => 0);
+
+        //     function find(x) {
+        //         while (parent[x] !== x) {
+        //             parent[x] = parent[parent[x]];
+        //             x = parent[x];
+        //         }
+        //         return x;
+        //     }
+
+        //     function unite(a, b) {
+        //         let ra = find(a);
+        //         let rb = find(b);
+        //         if (ra === rb) return false;
+        //         if (rank[ra] < rank[rb]) [ra, rb] = [rb, ra];
+        //         parent[rb] = ra;
+        //         if (rank[ra] === rank[rb]) rank[ra]++;
+        //         return true;
+        //     }
+
+        //     const mst = [];
+        //     for (const [, i, j] of candidates) {
+        //         if (unite(i, j)) {
+        //             mst.push([i, j]);
+        //             if (mst.length === n - 1) break;
+        //         }
+        //     }
+        //     return mst;
+        // }
+
+        function computeMST(pts) {
             const n = pts.length;
-            if (n <= 1) return [];
+            if (n <= 1) return { edges: [], totalLength: 0 };
 
-            const candidates = [];
-            for (let i = 0; i < n; i++) {
-                for (let j = i + 1; j < n; j++) {
-                    candidates.push([dist(pts[i].p, pts[j].p), i, j]);
+            const inTree = new Array(n).fill(false);
+            const minDist = new Array(n).fill(Infinity);
+            const parent = new Array(n).fill(-1);
+
+            minDist[0] = 0;
+
+            for (let step = 0; step < n; step++) {
+                let u = -1;
+                let best = Infinity;
+            
+                for (let i = 0; i < n; i++) {
+                    if (!inTree[i] && minDist[i] < best) {
+                        best = minDist[i];
+                        u = i;
+                    }
+                }
+            
+                if (u === -1) break;
+            
+                inTree[u] = true;
+            
+                for (let v = 0; v < n; v++) {
+                    if (inTree[v] || u === v) continue;
+                
+                    const d = dist(pts[u].p, pts[v].p);
+                    if (d < minDist[v]) {
+                        minDist[v] = d;
+                        parent[v] = u;
+                    }
                 }
             }
-            candidates.sort((a, b) => a[0] - b[0]);
-
-            const parent = Array.from({ length: n }, (_, i) => i);
-            const rank = Array.from({ length: n }, () => 0);
-
-            function find(x) {
-                while (parent[x] !== x) {
-                    parent[x] = parent[parent[x]];
-                    x = parent[x];
-                }
-                return x;
+        
+            const edges = [];
+            let totalLength = 0;
+        
+            for (let v = 1; v < n; v++) {
+                const u = parent[v];
+                if (u === -1) continue;
+            
+                edges.push([u, v]);
+                totalLength += dist(pts[u].p, pts[v].p);
             }
-
-            function unite(a, b) {
-                let ra = find(a);
-                let rb = find(b);
-                if (ra === rb) return false;
-                if (rank[ra] < rank[rb]) [ra, rb] = [rb, ra];
-                parent[rb] = ra;
-                if (rank[ra] === rank[rb]) rank[ra]++;
-                return true;
-            }
-
-            const mst = [];
-            for (const [, i, j] of candidates) {
-                if (unite(i, j)) {
-                    mst.push([i, j]);
-                    if (mst.length === n - 1) break;
-                }
-            }
-            return mst;
+        
+            return { edges, totalLength };
         }
 
         function buildLineSegments(edgePairs, materialOptions) {
@@ -1106,6 +1195,12 @@
             // compute complex
             const { edges, tris, tets } = computeComplex(points, filtration, r);
 
+            const mst = computeMST(points);
+            currentMSTLength = mst.totalLength;
+            // console.log(`MST length: ${currentMSTLength.toFixed(6)}`);
+
+            // mstLengthEl.textContent = formatScalar(mst.totalLength);
+
             // edges: LineSegments
             // if (edges.length) {
             //     const pos = new Float32Array(edges.length * 2 * 3);
@@ -1135,13 +1230,13 @@
             // MST graph: independent overlay, deliberately not black and lower alpha
             // so overlaps with filtration edges remain visible.
             if (showMSTChk.checked) {
-                const mstEdges = computeMSTEdges(points);
-                mstLines = buildLineSegments(mstEdges, {
+                mstLines = buildLineSegments(mst.edges, {
                     color: 0xf97316,
                     transparent: true,
                     opacity: 0.35,
                     depthWrite: false
                 });
+            
                 if (mstLines) scene.add(mstLines);
             }
 
