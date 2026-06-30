@@ -309,12 +309,6 @@
         dir.position.set(4, 6, 3);
         scene.add(dir);
 
-        // Reference axes + box
-        const axes = new THREE.AxesHelper(1.5);
-        axes.material.transparent = true;
-        axes.material.opacity = 0.35;
-        scene.add(axes);
-
         const box = new THREE.Box3(
             new THREE.Vector3(-BOX / 2, -BOX / 2, -BOX / 2),
             new THREE.Vector3(BOX / 2, BOX / 2, BOX / 2)
