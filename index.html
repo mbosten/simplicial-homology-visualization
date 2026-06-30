@@ -204,6 +204,16 @@
             <label for="showBalls" style="margin:0; flex:1;">Show balls (transparent)</label>
         </div>
 
+        <div class="row" style="margin-top:10px;">
+            <input id="showComplexEdges" type="checkbox" checked />
+            <label for="showComplexEdges" style="margin:0; flex:1;">Show complex edges</label>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+            <input id="showMST" type="checkbox" />
+            <label for="showMST" style="margin:0; flex:1;">Show MST graph</label>
+        </div>
+
         <div id="hud">
             <div><small>Points: <code id="nPts"></code></small></div>
             <div><small>Edges: <code id="nEdges"></code></small></div>
@@ -317,6 +327,7 @@
         let ballMeshes = [];
 
         let edgesLines = null;
+        let mstLines = null;
         let triMesh = null;
 
         // Materials
@@ -375,6 +386,8 @@
         const rSlider = $("r");
         const rLabel = $("rLabel");
         const showBallsChk = $("showBalls");
+        const showComplexEdgesChk = $("showComplexEdges");
+        const showMSTChk = $("showMST");
         const regenBtn = $("regen");
         const nPtsEl = $("nPts");
         const nEdgesEl = $("nEdges");
@@ -804,6 +817,68 @@
             return (ab * bc * ca) / (4 * area);
         }
 
+        // Build the Euclidean minimum spanning tree (MST) on the point cloud.
+        // This is independent of the filtration radius and is only used for visualization.
+        function computeMSTEdges(pts) {
+            const n = pts.length;
+            if (n <= 1) return [];
+
+            const candidates = [];
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    candidates.push([dist(pts[i].p, pts[j].p), i, j]);
+                }
+            }
+            candidates.sort((a, b) => a[0] - b[0]);
+
+            const parent = Array.from({ length: n }, (_, i) => i);
+            const rank = Array.from({ length: n }, () => 0);
+
+            function find(x) {
+                while (parent[x] !== x) {
+                    parent[x] = parent[parent[x]];
+                    x = parent[x];
+                }
+                return x;
+            }
+
+            function unite(a, b) {
+                let ra = find(a);
+                let rb = find(b);
+                if (ra === rb) return false;
+                if (rank[ra] < rank[rb]) [ra, rb] = [rb, ra];
+                parent[rb] = ra;
+                if (rank[ra] === rank[rb]) rank[ra]++;
+                return true;
+            }
+
+            const mst = [];
+            for (const [, i, j] of candidates) {
+                if (unite(i, j)) {
+                    mst.push([i, j]);
+                    if (mst.length === n - 1) break;
+                }
+            }
+            return mst;
+        }
+
+        function buildLineSegments(edgePairs, materialOptions) {
+            if (!edgePairs.length) return null;
+
+            const pos = new Float32Array(edgePairs.length * 2 * 3);
+            let idx = 0;
+            for (const [i, j] of edgePairs) {
+                const a = points[i].p, b = points[j].p;
+                pos[idx++] = a.x; pos[idx++] = a.y; pos[idx++] = a.z;
+                pos[idx++] = b.x; pos[idx++] = b.y; pos[idx++] = b.z;
+            }
+
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+            const mat = new THREE.LineBasicMaterial(materialOptions);
+            return new THREE.LineSegments(geom, mat);
+        }
+
         // Build edges + triangles for chosen filtration at radius r
         function computeComplex(pts, filtration, r) {
             const n = pts.length;
@@ -983,6 +1058,12 @@
                 edgesLines.material.dispose();
                 edgesLines = null;
             }
+            if (mstLines) {
+                scene.remove(mstLines);
+                mstLines.geometry.dispose();
+                mstLines.material.dispose();
+                mstLines = null;
+            }
             if (triMesh) {
                 scene.remove(triMesh);
                 triMesh.geometry.dispose();
@@ -1026,19 +1107,42 @@
             const { edges, tris, tets } = computeComplex(points, filtration, r);
 
             // edges: LineSegments
-            if (edges.length) {
-                const pos = new Float32Array(edges.length * 2 * 3);
-                let idx = 0;
-                for (const [i, j] of edges) {
-                    const a = points[i].p, b = points[j].p;
-                    pos[idx++] = a.x; pos[idx++] = a.y; pos[idx++] = a.z;
-                    pos[idx++] = b.x; pos[idx++] = b.y; pos[idx++] = b.z;
-                }
-                const geom = new THREE.BufferGeometry();
-                geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-                const mat = new THREE.LineBasicMaterial({ color: 0x111827, transparent: true, opacity: 0.75 });
-                edgesLines = new THREE.LineSegments(geom, mat);
-                scene.add(edgesLines);
+            // if (edges.length) {
+            //     const pos = new Float32Array(edges.length * 2 * 3);
+            //     let idx = 0;
+            //     for (const [i, j] of edges) {
+            //         const a = points[i].p, b = points[j].p;
+            //         pos[idx++] = a.x; pos[idx++] = a.y; pos[idx++] = a.z;
+            //         pos[idx++] = b.x; pos[idx++] = b.y; pos[idx++] = b.z;
+            //     }
+            //     const geom = new THREE.BufferGeometry();
+            //     geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+            //     const mat = new THREE.LineBasicMaterial({ color: 0x111827, transparent: true, opacity: 0.75 });
+            //     edgesLines = new THREE.LineSegments(geom, mat);
+            //     scene.add(edgesLines);
+            // }
+
+            if (showComplexEdgesChk.checked) {
+                edgesLines = buildLineSegments(edges, {
+                    color: 0x111827,
+                    transparent: true,
+                    opacity: 0.75
+                });
+
+                if (edgesLines) scene.add(edgesLines);
+            }
+
+            // MST graph: independent overlay, deliberately not black and lower alpha
+            // so overlaps with filtration edges remain visible.
+            if (showMSTChk.checked) {
+                const mstEdges = computeMSTEdges(points);
+                mstLines = buildLineSegments(mstEdges, {
+                    color: 0xf97316,
+                    transparent: true,
+                    opacity: 0.35,
+                    depthWrite: false
+                });
+                if (mstLines) scene.add(mstLines);
             }
 
             // triangles: semi-transparent faces
@@ -1161,6 +1265,8 @@
         });
         rSlider.addEventListener("input", scheduleRebuildComplex);
         showBallsChk.addEventListener("change", scheduleRebuildComplex);
+        showComplexEdgesChk.addEventListener("change", scheduleRebuildComplex);
+        showMSTChk.addEventListener("change", scheduleRebuildComplex);
         regenBtn.addEventListener("click", () => {
             createPoints(NUM_POINTS);
             closeMobileDrawer();
